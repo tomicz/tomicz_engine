@@ -13,17 +13,31 @@ find_library(QUARTZCORE_LIBRARY QuartzCore REQUIRED)
 # GLFW setup
 find_package(glfw3 REQUIRED)
 
+# GLM setup
+find_package(glm REQUIRED)
+
 # Set source files
 set(SOURCES
     src/main.cpp
     src/Window.cpp
+    src/Camera.cpp
     src/Renderer/MetalRenderer.mm
+    src/Voxel/Block.cpp
+    src/Voxel/Chunk.cpp
+    src/Voxel/World.cpp
+    src/Voxel/VoxelRenderer.mm
 )
 
 # Set header files
 set(HEADERS
     src/Window.h
+    src/Camera.h
     src/Renderer/MetalRenderer.h
+    src/Voxel/Block.h
+    src/Voxel/Chunk.h
+    src/Voxel/World.h
+    src/Voxel/FastNoise.h
+    src/Voxel/VoxelRenderer.h
 )
 
 # Create executable
@@ -39,6 +53,7 @@ target_link_libraries(${PROJECT_NAME}
     ${METALKIT_LIBRARY}
     ${QUARTZCORE_LIBRARY}
     glfw
+    glm::glm
 )
 
 # Set up Metal shader compilation
@@ -57,13 +72,26 @@ add_custom_command(
     COMMENT "Compiling Metal shaders"
 )
 
+# Add custom command to compile voxel shaders
+add_custom_command(
+    OUTPUT ${METAL_SHADER_OUTPUT_DIR}/VoxelShaders.metallib
+    COMMAND xcrun -sdk macosx metal -c ${METAL_SHADER_DIR}/VoxelShaders.metal -o ${METAL_SHADER_OUTPUT_DIR}/VoxelShaders.air
+    COMMAND xcrun -sdk macosx metallib ${METAL_SHADER_OUTPUT_DIR}/VoxelShaders.air -o ${METAL_SHADER_OUTPUT_DIR}/VoxelShaders.metallib
+    DEPENDS ${METAL_SHADER_DIR}/VoxelShaders.metal
+    COMMENT "Compiling Voxel shaders"
+)
+
 # Add custom target for shaders
-add_custom_target(Shaders DEPENDS ${METAL_SHADER_OUTPUT_DIR}/Shaders.metallib)
+add_custom_target(Shaders DEPENDS 
+    ${METAL_SHADER_OUTPUT_DIR}/Shaders.metallib
+    ${METAL_SHADER_OUTPUT_DIR}/VoxelShaders.metallib
+)
 add_dependencies(${PROJECT_NAME} Shaders)
 
-# Copy the compiled shader library to the build directory
+# Copy the compiled shader libraries to the build directory
 add_custom_command(
     TARGET ${PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy ${METAL_SHADER_OUTPUT_DIR}/Shaders.metallib $<TARGET_FILE_DIR:${PROJECT_NAME}>
-    COMMENT "Copying Metal shader library to output directory"
+    COMMAND ${CMAKE_COMMAND} -E copy ${METAL_SHADER_OUTPUT_DIR}/VoxelShaders.metallib $<TARGET_FILE_DIR:${PROJECT_NAME}>
+    COMMENT "Copying Metal shader libraries to output directory"
 ) 
