@@ -58,7 +58,7 @@ bool Window::init() {
 
     // Get the actual window size (may be different due to high DPI)
     glfwGetFramebufferSize(m_window, &m_width, &m_height);
-
+    
     return true;
 }
 

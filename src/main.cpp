@@ -3,6 +3,7 @@
 #include "Voxel/World.h"
 #include "Voxel/VoxelRenderer.h"
 
+#include <GLFW/glfw3.h>
 #include <iostream>
 #include <memory>
 #include <chrono>

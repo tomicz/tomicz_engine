@@ -9,6 +9,8 @@
 
 #include <iostream>
 #include <unordered_map>
+#include <string>
+#include <filesystem>
 
 // Uniform buffer for transformation matrices
 struct Uniforms {
@@ -33,10 +35,30 @@ struct VoxelRenderer::Impl {
     id<MTLDepthStencilState> depthStencilState;
     id<MTLTexture> textureAtlas;
     id<MTLSamplerState> samplerState;
+    id<MTLRenderCommandEncoder> currentRenderEncoder;
     
     // Chunk meshes
     std::unordered_map<ChunkPosition, ChunkMeshData, ChunkPosition::Hash> chunkMeshes;
 };
+
+// Helper function to convert glm::mat4 to simd::float4x4
+simd::float4x4 glmToSIMD(const glm::mat4& matrix) {
+    simd::float4x4 result;
+    
+    // Create each column vector
+    simd::float4 col0 = {matrix[0][0], matrix[1][0], matrix[2][0], matrix[3][0]};
+    simd::float4 col1 = {matrix[0][1], matrix[1][1], matrix[2][1], matrix[3][1]};
+    simd::float4 col2 = {matrix[0][2], matrix[1][2], matrix[2][2], matrix[3][2]};
+    simd::float4 col3 = {matrix[0][3], matrix[1][3], matrix[2][3], matrix[3][3]};
+    
+    // Assign to columns
+    result.columns[0] = col0;
+    result.columns[1] = col1;
+    result.columns[2] = col2;
+    result.columns[3] = col3;
+    
+    return result;
+}
 
 // Constructor
 VoxelRenderer::VoxelRenderer(Window* window)
@@ -65,11 +87,20 @@ bool VoxelRenderer::init() {
         return false;
     }
     
-    // Load default library
-    m_impl->library = [m_impl->device newDefaultLibrary];
+    // Load Metal library from file
+    NSString* libraryPath = [NSString stringWithUTF8String:"VoxelShaders.metallib"];
+    NSError* error = nil;
+    m_impl->library = [m_impl->device newLibraryWithFile:libraryPath error:&error];
+    
     if (!m_impl->library) {
-        std::cerr << "Failed to load Metal library!" << std::endl;
-        return false;
+        std::cerr << "Failed to load Metal library from file: " << [error.localizedDescription UTF8String] << std::endl;
+        
+        // Try to load default library as fallback
+        m_impl->library = [m_impl->device newDefaultLibrary];
+        if (!m_impl->library) {
+            std::cerr << "Failed to load default Metal library!" << std::endl;
+            return false;
+        }
     }
     
     // Create render pipeline state
@@ -122,7 +153,7 @@ bool VoxelRenderer::init() {
     pipelineDescriptor.vertexDescriptor = vertexDescriptor;
     
     // Create pipeline state
-    NSError* error = nil;
+    error = nil;
     m_impl->pipelineState = [m_impl->device newRenderPipelineStateWithDescriptor:pipelineDescriptor error:&error];
     
     if (!m_impl->pipelineState) {
@@ -161,11 +192,24 @@ void VoxelRenderer::render(World* world, const Camera& camera) {
     // Get Metal layer
     NSWindow* nsWindow = (__bridge NSWindow*)m_window->getNativeWindow();
     NSView* contentView = [nsWindow contentView];
-    CAMetalLayer* metalLayer = (CAMetalLayer*)[contentView layer];
+    
+    // Make sure the view's layer is a CAMetalLayer
+    if (![contentView.layer isKindOfClass:[CAMetalLayer class]]) {
+        // Set the view to use a metal layer
+        [contentView setWantsLayer:YES];
+        CAMetalLayer* metalLayer = [CAMetalLayer layer];
+        metalLayer.device = m_impl->device;
+        metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        metalLayer.framebufferOnly = YES;
+        contentView.layer = metalLayer;
+    }
+    
+    CAMetalLayer* metalLayer = (CAMetalLayer*)contentView.layer;
     
     // Get drawable
     id<CAMetalDrawable> drawable = [metalLayer nextDrawable];
     if (!drawable) {
+        std::cerr << "Failed to get next drawable" << std::endl;
         return;
     }
     
@@ -195,32 +239,21 @@ void VoxelRenderer::render(World* world, const Camera& camera) {
     id<MTLCommandBuffer> commandBuffer = [m_impl->commandQueue commandBuffer];
     
     // Create render command encoder
-    id<MTLRenderCommandEncoder> renderEncoder = [commandBuffer renderCommandEncoderWithDescriptor:renderPassDescriptor];
-    [renderEncoder setRenderPipelineState:m_impl->pipelineState];
-    [renderEncoder setDepthStencilState:m_impl->depthStencilState];
+    m_impl->currentRenderEncoder = [commandBuffer renderCommandEncoderWithDescriptor:renderPassDescriptor];
+    [m_impl->currentRenderEncoder setRenderPipelineState:m_impl->pipelineState];
+    [m_impl->currentRenderEncoder setDepthStencilState:m_impl->depthStencilState];
     
     // Set texture and sampler
-    [renderEncoder setFragmentTexture:m_impl->textureAtlas atIndex:0];
-    [renderEncoder setFragmentSamplerState:m_impl->samplerState atIndex:0];
+    [m_impl->currentRenderEncoder setFragmentTexture:m_impl->textureAtlas atIndex:0];
+    [m_impl->currentRenderEncoder setFragmentSamplerState:m_impl->samplerState atIndex:0];
     
     // Get view and projection matrices
     glm::mat4 viewMatrix = camera.getViewMatrix();
     glm::mat4 projectionMatrix = camera.getProjectionMatrix();
     
     // Convert to simd matrices
-    simd::float4x4 simdViewMatrix = simd::float4x4(
-        simd::float4(viewMatrix[0][0], viewMatrix[0][1], viewMatrix[0][2], viewMatrix[0][3]),
-        simd::float4(viewMatrix[1][0], viewMatrix[1][1], viewMatrix[1][2], viewMatrix[1][3]),
-        simd::float4(viewMatrix[2][0], viewMatrix[2][1], viewMatrix[2][2], viewMatrix[2][3]),
-        simd::float4(viewMatrix[3][0], viewMatrix[3][1], viewMatrix[3][2], viewMatrix[3][3])
-    );
-    
-    simd::float4x4 simdProjectionMatrix = simd::float4x4(
-        simd::float4(projectionMatrix[0][0], projectionMatrix[0][1], projectionMatrix[0][2], projectionMatrix[0][3]),
-        simd::float4(projectionMatrix[1][0], projectionMatrix[1][1], projectionMatrix[1][2], projectionMatrix[1][3]),
-        simd::float4(projectionMatrix[2][0], projectionMatrix[2][1], projectionMatrix[2][2], projectionMatrix[2][3]),
-        simd::float4(projectionMatrix[3][0], projectionMatrix[3][1], projectionMatrix[3][2], projectionMatrix[3][3])
-    );
+    simd::float4x4 simdViewMatrix = glmToSIMD(viewMatrix);
+    simd::float4x4 simdProjectionMatrix = glmToSIMD(projectionMatrix);
     
     // Render chunks
     for (const auto& pair : world->getChunks()) {
@@ -229,7 +262,7 @@ void VoxelRenderer::render(World* world, const Camera& camera) {
     }
     
     // End encoding and present
-    [renderEncoder endEncoding];
+    [m_impl->currentRenderEncoder endEncoding];
     [commandBuffer presentDrawable:drawable];
     [commandBuffer commit];
 }
@@ -308,31 +341,15 @@ void VoxelRenderer::renderChunk(Chunk* chunk, const Camera& camera) {
     glm::mat4 modelMatrix = glm::translate(glm::mat4(1.0f), glm::vec3(position.x * CHUNK_SIZE, 0.0f, position.z * CHUNK_SIZE));
     
     // Convert to simd matrix
-    simd::float4x4 simdModelMatrix = simd::float4x4(
-        simd::float4(modelMatrix[0][0], modelMatrix[0][1], modelMatrix[0][2], modelMatrix[0][3]),
-        simd::float4(modelMatrix[1][0], modelMatrix[1][1], modelMatrix[1][2], modelMatrix[1][3]),
-        simd::float4(modelMatrix[2][0], modelMatrix[2][1], modelMatrix[2][2], modelMatrix[2][3]),
-        simd::float4(modelMatrix[3][0], modelMatrix[3][1], modelMatrix[3][2], modelMatrix[3][3])
-    );
+    simd::float4x4 simdModelMatrix = glmToSIMD(modelMatrix);
     
     // Get view and projection matrices
     glm::mat4 viewMatrix = camera.getViewMatrix();
     glm::mat4 projectionMatrix = camera.getProjectionMatrix();
     
     // Convert to simd matrices
-    simd::float4x4 simdViewMatrix = simd::float4x4(
-        simd::float4(viewMatrix[0][0], viewMatrix[0][1], viewMatrix[0][2], viewMatrix[0][3]),
-        simd::float4(viewMatrix[1][0], viewMatrix[1][1], viewMatrix[1][2], viewMatrix[1][3]),
-        simd::float4(viewMatrix[2][0], viewMatrix[2][1], viewMatrix[2][2], viewMatrix[2][3]),
-        simd::float4(viewMatrix[3][0], viewMatrix[3][1], viewMatrix[3][2], viewMatrix[3][3])
-    );
-    
-    simd::float4x4 simdProjectionMatrix = simd::float4x4(
-        simd::float4(projectionMatrix[0][0], projectionMatrix[0][1], projectionMatrix[0][2], projectionMatrix[0][3]),
-        simd::float4(projectionMatrix[1][0], projectionMatrix[1][1], projectionMatrix[1][2], projectionMatrix[1][3]),
-        simd::float4(projectionMatrix[2][0], projectionMatrix[2][1], projectionMatrix[2][2], projectionMatrix[2][3]),
-        simd::float4(projectionMatrix[3][0], projectionMatrix[3][1], projectionMatrix[3][2], projectionMatrix[3][3])
-    );
+    simd::float4x4 simdViewMatrix = glmToSIMD(viewMatrix);
+    simd::float4x4 simdProjectionMatrix = glmToSIMD(projectionMatrix);
     
     // Create uniforms
     Uniforms uniforms;
@@ -340,19 +357,16 @@ void VoxelRenderer::renderChunk(Chunk* chunk, const Camera& camera) {
     uniforms.viewMatrix = simdViewMatrix;
     uniforms.projectionMatrix = simdProjectionMatrix;
     
-    // Get render command encoder
-    id<MTLRenderCommandEncoder> renderEncoder = [m_impl->commandQueue commandBuffer].renderCommandEncoder;
-    
     // Set vertex buffer and uniforms
-    [renderEncoder setVertexBuffer:meshData.vertexBuffer offset:0 atIndex:0];
-    [renderEncoder setVertexBytes:&uniforms length:sizeof(Uniforms) atIndex:1];
+    [m_impl->currentRenderEncoder setVertexBuffer:meshData.vertexBuffer offset:0 atIndex:0];
+    [m_impl->currentRenderEncoder setVertexBytes:&uniforms length:sizeof(Uniforms) atIndex:1];
     
     // Draw indexed primitives
-    [renderEncoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
-                              indexCount:meshData.indexCount
-                               indexType:MTLIndexTypeUInt32
-                             indexBuffer:meshData.indexBuffer
-                       indexBufferOffset:0];
+    [m_impl->currentRenderEncoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+                                             indexCount:meshData.indexCount
+                                              indexType:MTLIndexTypeUInt32
+                                            indexBuffer:meshData.indexBuffer
+                                      indexBufferOffset:0];
 }
 
 // Load texture atlas
